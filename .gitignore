@@ -1,0 +1,42 @@
+# Binaries
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go build artifacts
+/grid-platform-api/grid-platform-api
+/verifier-service/verifier-service
+
+# Environment variables
+.env
+*.env
+
+# Vendor dependencies (optional - depends on your preference)
+/grid-platform-api/vendor/
+/verifier-service/vendor/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Certificates and keys (IMPORTANT!)
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# Hyperledger Fabric artifacts (if you add them later)
+/fabric-network/crypto-config/
+/fabric-network/channel-artifacts/
