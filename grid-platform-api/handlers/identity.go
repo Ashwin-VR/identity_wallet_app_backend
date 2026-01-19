@@ -4,6 +4,7 @@ import (
 	"log"
 	"net/http"
 
+	"github.com/Ashwin-VR/grid-platform-api/fabric"
 	"github.com/Ashwin-VR/grid-platform-api/models"
 	"github.com/gin-gonic/gin"
 )
@@ -20,10 +21,21 @@ func OnboardIdentity(c *gin.Context) {
 		return
 	}
 
-	// TODO: Call Hyperledger Fabric to store identity
-	// For now, store in memory
-	identityStore[identity.UUID] = identity
+	client, err := fabric.NewClient()
+	if err != nil {
+		log.Printf("❌ Fabric client init failed: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "fabric client init failed"})
+		return
+	}
 
+	if err := client.OnboardIdentity(identity.AadhaarHash, identity.PublicKey); err != nil {
+		log.Printf("❌ Fabric onboard failed: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "fabric onboard failed"})
+		return
+	}
+
+	// still keep in-memory for now
+	identityStore[identity.UUID] = identity
 	log.Printf("✅ Identity onboarded: UUID=%s", identity.UUID)
 
 	c.JSON(http.StatusOK, gin.H{
