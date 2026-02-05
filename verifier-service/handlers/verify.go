@@ -1,79 +1,43 @@
 package handlers
 
 import (
-	"log"
+	"fmt"
+	"io"
 	"net/http"
+	"os"
 
-	"github.com/Ashwin-VR/verifier-service/client"
-	"github.com/Ashwin-VR/verifier-service/models"
-	"github.com/gin-gonic/gin"
+	"github.com/gofiber/fiber/v2"
 )
 
-// AuthenticateIdentity handles POST /api/v1/authenticate
-func AuthenticateIdentity(c *gin.Context) {
-	var req models.AuthenticateRequest
-
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
+func VerifyHandler(c *fiber.Ctx) error {
+	uuid := c.Query("uuid")
+	if uuid == "" {
+		return c.Status(400).JSON(fiber.Map{"error": "UUID is required"})
 	}
 
-	log.Printf("🔍 Authentication request for UUID: %s", req.UUID)
+	// 1. Prepare request to Grid Platform
+	gridURL := os.Getenv("GRID_PLATFORM_URL")
+	verifyKey := os.Getenv("VERIFIER_API_KEY")
 
-	// Initialize Grid Platform client
-	gridClient := client.NewGridPlatformClient()
+	fullURL := fmt.Sprintf("%s/api/v1/internal/identity/verify?uuid=%s", gridURL, uuid)
 
-	// Step 1: Get identity from Grid Platform
-	identity, err := gridClient.GetIdentity(req.UUID)
+	req, err := http.NewRequest("POST", fullURL, nil)
 	if err != nil {
-		log.Printf("❌ Failed to retrieve identity: %v", err)
-		c.JSON(http.StatusNotFound, models.AuthenticateResponse{
-			Success:       false,
-			Authenticated: false,
-			Message:       "Identity not found",
-		})
-		return
+		return c.Status(500).JSON(fiber.Map{"error": "Failed to create request"})
 	}
 
-	log.Printf("✅ Identity retrieved: UUID=%s", identity.UUID)
+	// 2. Add the Auth Header that Grid API expects
+	req.Header.Set("X-Verifier-Key", verifyKey)
 
-	// Step 2: Verify identity through Grid Platform
-	verifyReq := models.VerifyRequest{
-		UUID:         identity.UUID,
-		AadhaarHash:  identity.AadhaarHash,
-		DigitalSig:   identity.DigitalSig,
-		PublicKey:    identity.PublicKey,
-		CombinedHash: identity.CombinedHash,
-		HashFunction: identity.HashFunction,
-	}
-
-	verifyResp, err := gridClient.VerifyIdentity(verifyReq)
+	// 3. Execute call
+	client := &http.Client{}
+	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("❌ Verification failed: %v", err)
-		c.JSON(http.StatusInternalServerError, models.AuthenticateResponse{
-			Success:       false,
-			Authenticated: false,
-			Message:       "Verification process failed: " + err.Error(),
-		})
-		return
+		return c.Status(500).JSON(fiber.Map{"error": "Grid platform unreachable"})
 	}
+	defer resp.Body.Close()
 
-	// Step 3: Return result
-	if verifyResp.Verified {
-		log.Printf("✅ Identity verified successfully: UUID=%s", req.UUID)
-		c.JSON(http.StatusOK, models.AuthenticateResponse{
-			Success:       true,
-			Authenticated: true,
-			Message:       "Authentication successful",
-			SessionID:     req.SessionID,
-		})
-	} else {
-		log.Printf("❌ Identity verification failed: %s", verifyResp.Reason)
-		c.JSON(http.StatusOK, models.AuthenticateResponse{
-			Success:       true,
-			Authenticated: false,
-			Message:       verifyResp.Reason,
-			SessionID:     req.SessionID,
-		})
-	}
+	body, _ := io.ReadAll(resp.Body)
+
+	return c.Status(resp.StatusCode).Send(body)
 }
