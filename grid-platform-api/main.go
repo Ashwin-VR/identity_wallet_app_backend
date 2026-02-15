@@ -2,56 +2,73 @@ package main
 
 import (
 	"fmt"
+	"grid-platform-api/fabric"
+	"grid-platform-api/handlers"
 	"log"
 	"os"
+	"time"
 
-	// THE FIX: Use the full module path from go.mod
-	"github.com/Ashwin-VR/grid-platform-api/fabric"
-	"github.com/Ashwin-VR/grid-platform-api/handlers"
-
-	"github.com/gofiber/fiber/v2"
-	"github.com/gofiber/fiber/v2/middleware/keyauth"
-	"github.com/gofiber/fiber/v2/middleware/logger"
+	"github.com/gin-gonic/gin"
+	"github.com/hyperledger/fabric-gateway/pkg/client"
 	"github.com/joho/godotenv"
 )
 
 func main() {
 	if err := godotenv.Load(); err != nil {
-		log.Println("Note: .env file not found")
+		log.Fatal("Error loading .env file")
 	}
 
-	app := fiber.New()
-	app.Use(logger.New())
-
-	// Initialize Fabric Client
-	fabricClient, err := fabric.NewFabricClient()
+	// 1. Setup Fabric Connection
+	clientConn, err := fabric.NewGrpcConnection(
+		os.Getenv("FABRIC_TLS_CERT_PATH"),
+		os.Getenv("FABRIC_PEER_ENDPOINT"),
+		os.Getenv("FABRIC_GATEWAY_PEER"),
+	)
 	if err != nil {
-		log.Fatalf("Critical: Could not connect to Fabric Network: %v", err)
+		log.Fatalf("Failed to create gRPC connection: %v", err)
+	}
+	defer clientConn.Close()
+
+	id, err := fabric.NewIdentity(os.Getenv("FABRIC_CERT_PATH"), os.Getenv("FABRIC_MSP_ID"))
+	if err != nil {
+		log.Fatalf("Failed to create identity: %v", err)
 	}
 
-	h := &handlers.IdentityHandler{Fabric: fabricClient}
+	sign, err := fabric.NewSign(os.Getenv("FABRIC_KEY_PATH"))
+	if err != nil {
+		log.Fatalf("Failed to create sign: %v", err)
+	}
 
-	// Middleware for Verifier Service
-	authInternal := keyauth.New(keyauth.Config{
-		KeyLookup: "header:X-Verifier-Key",
-		Validator: func(c *fiber.Ctx, key string) (bool, error) {
-			return key == os.Getenv("VERIFIER_API_KEY"), nil
-		},
-	})
+	// 2. Create Gateway
+	gw, err := client.Connect(
+		id,
+		client.WithSign(sign),
+		client.WithClientConnection(clientConn),
+		client.WithEvaluateTimeout(5*time.Second),
+		client.WithEndorseTimeout(15*time.Second),
+		client.WithSubmitTimeout(10*time.Second),
+	)
+	if err != nil {
+		log.Fatalf("Failed to connect to gateway: %v", err)
+	}
+	defer gw.Close()
 
-	api := app.Group("/api/v1/internal/identity")
+	network := gw.GetNetwork(os.Getenv("FABRIC_CHANNEL"))
+	contract := network.GetContract(os.Getenv("FABRIC_CHAINCODE"))
 
-	// Endpoint 1: Onboard (Wallet)
-	api.Post("/onboard", h.Onboard)
+	// 3. Routes
+	r := gin.Default()
 
-	// Endpoint 2: Verify (Verifier Service Only)
-	api.Post("/verify", authInternal, h.Verify)
+	// Public onboarding
+	r.POST("/create", handlers.CreateIdentityHandler(contract))
+
+	// Internal verification (Requires API Key)
+	r.POST("/verify", handlers.VerifyIdentityHandler(contract))
 
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
-
-	fmt.Printf("Grid Platform API starting on port %s...\n", port)
-	log.Fatal(app.Listen(":" + port))
+	fmt.Printf("Grid Platform API running on :%s\n", port)
+	r.Run(":" + port)
 }

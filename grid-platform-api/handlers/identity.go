@@ -2,84 +2,68 @@ package handlers
 
 import (
 	"encoding/json"
-	// FIXED IMPORTS:
-	"github.com/Ashwin-VR/grid-platform-api/fabric"
-	"github.com/Ashwin-VR/grid-platform-api/models"
+	"os"
 
-	"github.com/gofiber/fiber/v2"
+	"github.com/gin-gonic/gin"
+	"github.com/hyperledger/fabric-gateway/pkg/client"
 )
 
-type IdentityHandler struct {
-	Fabric *fabric.FabricClient
+type Identity struct {
+	UUID          string `json:"uuid"`
+	AadhaarHash   string `json:"aadhaarHash"`
+	DigitalSig    string `json:"digitalSig"`
+	PublicKey     string `json:"publicKey"`
+	HashFunction  string `json:"hashFunction"`
+	TwoFARequired bool   `json:"twoFARequired"`
+	CombinedHash  string `json:"combinedHash"`
+	Timestamp     string `json:"timestamp"`
 }
 
-/*
-	func (h *IdentityHandler) Onboard(c *fiber.Ctx) error {
-		var req models.Identity
-		if err := c.BodyParser(&req); err != nil {
-			return c.Status(400).JSON(fiber.Map{"error": "Invalid request body"})
+func CreateIdentityHandler(contract *client.Contract) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var id Identity
+		if err := c.ShouldBindJSON(&id); err != nil {
+			c.JSON(400, gin.H{"success": false, "error": "Invalid Identity format"})
+			return
 		}
 
-		payload, _ := json.Marshal(req)
-		// Submit to blockchain
-		_, err := h.Fabric.Contract.SubmitTransaction("CreateIdentity", string(payload))
+		// Ground Truth: Chaincode expects the raw JSON string as the first argument
+		idJSON, _ := json.Marshal(id)
+		_, err := contract.SubmitTransaction("CreateIdentity", string(idJSON))
 		if err != nil {
-			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+			c.JSON(500, gin.H{"success": false, "error": err.Error()})
+			return
 		}
 
-		return c.JSON(fiber.Map{"status": "success", "message": "Identity anchored to Fabric"})
+		c.JSON(200, gin.H{"success": true, "message": "Identity onboarded successfully"})
 	}
-
-	func (h *IdentityHandler) Verify(c *fiber.Ctx) error {
-		uuid := c.Query("uuid")
-		if uuid == "" {
-			return c.Status(400).JSON(fiber.Map{"error": "UUID is required"})
-		}
-
-		// Read from blockchain
-		result, err := h.Fabric.Contract.EvaluateTransaction("VerifyIdentity", uuid)
-		if err != nil {
-			return c.Status(404).JSON(fiber.Map{"error": "On-chain verification failed or not found"})
-		}
-
-		var verificationResult map[string]interface{}
-		json.Unmarshal(result, &verificationResult)
-
-		return c.JSON(verificationResult)
-	}
-*/
-func (h *IdentityHandler) Verify(c *fiber.Ctx) error {
-	// Safety Check
-	if h.Fabric.Contract == nil {
-		return c.Status(200).JSON(fiber.Map{
-			"success":  true,
-			"verified": true,
-			"message":  "Mock Verification: System is working!",
-		})
-	}
-
-	// ... rest of your real Fabric logic
-	return nil
 }
-func (h *IdentityHandler) Onboard(c *fiber.Ctx) error {
-	// ADD THIS SAFETY CHECK
-	if h.Fabric.Contract == nil {
-		return c.Status(200).JSON(fiber.Map{
-			"status":  "mock_success",
-			"message": "Mock Onboarding: Blockchain connection bypassed for testing.",
-		})
-	}
 
-	var req models.Identity
-	if err := c.BodyParser(&req); err != nil {
-		return c.Status(400).JSON(fiber.Map{"error": "Invalid request body"})
-	}
+func VerifyIdentityHandler(contract *client.Contract) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Internal Security Check
+		if c.GetHeader("X-API-KEY") != os.Getenv("INTERNAL_SERVICE_KEY") {
+			c.JSON(401, gin.H{"success": false, "error": "Unauthorized"})
+			return
+		}
 
-	payload, _ := json.Marshal(req)
-	_, err := h.Fabric.Contract.SubmitTransaction("CreateIdentity", string(payload))
-	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"error": err.Error()})
-	}
+		var req struct {
+			UUID      string `json:"uuid"`
+			Challenge string `json:"challenge"`
+			Signature string `json:"signature"` // Base64 r||s
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(400, gin.H{"success": false, "error": "Invalid request"})
+			return
+		}
 
-	return c.JSON(fiber.Map{"status": "success", "message": "Identity anchored to Fabric"})
+		// Ground Truth: Chaincode expects 3 string arguments
+		result, err := contract.EvaluateTransaction("VerifyIdentity", req.UUID, req.Challenge, req.Signature)
+		if err != nil {
+			c.JSON(200, gin.H{"success": true, "valid": false, "error": err.Error()})
+			return
+		}
+
+		c.JSON(200, gin.H{"success": true, "valid": string(result) == "true"})
+	}
 }
