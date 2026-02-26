@@ -70,5 +70,5 @@ func main() {
 		port = "8080"
 	}
 	fmt.Printf("Grid Platform API running on :%s\n", port)
-	r.Run(":" + port)
+	r.Run("0.0.0.0:" + port)
 }

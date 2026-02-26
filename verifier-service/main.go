@@ -1,41 +1,74 @@
 package main
 
 import (
-	"fmt"
-	"log"
-	"os"
-	"verifier-service/handlers"
+	"bytes"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"net/http"
+	"sync"
 
 	"github.com/gin-gonic/gin"
-	"github.com/joho/godotenv"
+)
+
+const (
+	GridAPIURL     = "http://localhost:8080"
+	InternalAPIKey = "your_internal_service_key"
+)
+
+var (
+	challenges = make(map[string]string)
+	mu         sync.RWMutex
 )
 
 func main() {
-	if err := godotenv.Load(); err != nil {
-		log.Fatal("Error loading .env file")
-	}
-
-	// Initialize the Global Hub for WebSockets
-	handlers.InitHub()
-
 	r := gin.Default()
 
-	// Standard Endpoints
-	r.GET("/challenge/:uuid", handlers.GetChallengeHandler)
-	r.POST("/verify-uuid", handlers.VerifyUUIDHandler)
+	r.GET("/challenge/:uuid", func(c *gin.Context) {
+		b := make([]byte, 32)
+		rand.Read(b)
+		val := hex.EncodeToString(b)
+		mu.Lock()
+		challenges[c.Param("uuid")] = val
+		mu.Unlock()
+		c.JSON(200, gin.H{"uuid": c.Param("uuid"), "challenge": val})
+	})
 
-	// --- P2P & NOTIFICATION ENDPOINTS ---
+	r.POST("/verify-uuid", func(c *gin.Context) {
+		var req struct {
+			UUID      string `json:"uuid"`
+			Challenge string `json:"challenge"`
+			Signature string `json:"signature"`
+		}
+		c.ShouldBindJSON(&req)
 
-	// WebSocket endpoint for both Enterprise and P2P Listeners
-	r.GET("/ws", handlers.WebSocketHandler)
+		// 1. Internal check: Did we actually issue this challenge?
+		mu.RLock()
+		stored, ok := challenges[req.UUID]
+		mu.RUnlock()
+		if !ok || stored != req.Challenge {
+			c.JSON(200, gin.H{"valid": false, "error": "Invalid challenge"})
+			return
+		}
 
-	// P2P Polling: Prover checks if a Scanner has requested a challenge from them
-	r.GET("/p2p/poll/:uuid", handlers.P2PPollHandler)
+		// 2. Call Grid API (Blockchain)
+		jsonB, _ := json.Marshal(req)
+		hReq, _ := http.NewRequest("POST", GridAPIURL+"/verify", bytes.NewBuffer(jsonB))
+		hReq.Header.Set("X-API-KEY", InternalAPIKey)
+		hReq.Header.Set("Content-Type", "application/json")
 
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8081"
-	}
-	fmt.Printf("Verifier Service (Enhanced) running on :%s\n", port)
-	r.Run(":" + port)
+		client := &http.Client{}
+		resp, err := client.Do(hReq)
+		if err != nil {
+			c.JSON(500, gin.H{"valid": false, "error": "Blockchain API unreachable"})
+			return
+		}
+		defer resp.Body.Close()
+
+		var result map[string]interface{}
+		json.NewDecoder(resp.Body).Decode(&result)
+		c.JSON(200, result)
+	})
+
+	r.Run("0.0.0.0:8081")
 }

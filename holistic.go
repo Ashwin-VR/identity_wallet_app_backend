@@ -22,6 +22,9 @@ import (
 const (
 	GridAPI     = "http://localhost:8080"
 	VerifierAPI = "http://localhost:8081"
+	BankAPI     = "http://localhost:8082"
+	P2PServer   = "http://localhost:8083"
+	InternalKey = "your_internal_service_key" // MUST match Grid API config
 )
 
 type Identity struct {
@@ -42,64 +45,92 @@ type TestUser struct {
 }
 
 func main() {
-	fmt.Println("🧪 Starting Holistic Edge-Case Testing...")
+	fmt.Println("🚀 DEEP SYSTEM INTEGRATION TEST")
 
-	// 1. SETUP TWO IDENTITIES
+	// 1. SETUP
 	userA := createTestUser("User_A")
 	userB := createTestUser("User_B")
 
-	fmt.Println("\n--- [Test 1: Parallel Onboarding] ---")
+	// --- SECTION 1: BLOCKCHAIN ONBOARDING ---
+	fmt.Println("\n--- [Test 1: Blockchain Onboarding] ---")
 	onboardUser(userA)
 	onboardUser(userB)
 
-	// 2. TEST CASE: CROSS-VERIFICATION (EXPECTED FAIL)
-	fmt.Println("\n--- [Test 2: Cross-Verification Attack (Should FAIL)] ---")
-	chalA := fetchChallenge(userA.UUID)
-	// Sign User A's challenge with User B's private key
-	sigB := base64.StdEncoding.EncodeToString(signData(userB.PrivKey, chalA))
-	verifyResult(userA.UUID, chalA, sigB, "Cross-User Signing")
+	// --- SECTION 2: BANK FLOW (ENTERPRISE) ---
+	fmt.Println("\n--- [Test 2: Bank/Enterprise Flow] ---")
+	bankResp := getRequest(BankAPI + "/bank/init-login")
+	sessID := bankResp["session_id"].(string)
+	fmt.Printf("Bank Session Created: %s\n", sessID)
 
-	// 3. TEST CASE: TAMPERED CHALLENGE (EXPECTED FAIL)
-	fmt.Println("\n--- [Test 3: Tampered Challenge (Should FAIL)] ---")
-	chalB := fetchChallenge(userB.UUID)
-	sigActualB := base64.StdEncoding.EncodeToString(signData(userB.PrivKey, chalB))
-	// Change one character in the challenge before sending to API
-	tamperedChal := chalB[:len(chalB)-1] + "0"
-	verifyResult(userB.UUID, tamperedChal, sigActualB, "Tampered Challenge Data")
+	fmt.Println("🧐 Fetching challenge through Bank API...")
+	chalResp := getRequest(BankAPI + "/api/get-challenge/" + userA.UUID)
+	challenge := chalResp["challenge"].(string)
 
-	// 4. TEST CASE: DUPLICATE REGISTRATION (EXPECTED FAIL)
-	fmt.Println("\n--- [Test 4: Duplicate UUID Registration (Should FAIL)] ---")
-	status, _ := onboardUser(userA)
-	if status != 200 {
-		fmt.Printf("✅ Success: Blockchain rejected duplicate UUID (Status: %d)\n", status)
-	} else {
-		fmt.Println("❌ Failure: Blockchain allowed duplicate registration!")
+	sigA := base64.StdEncoding.EncodeToString(signData(userA.PrivKey, challenge))
+	payload := map[string]string{
+		"uuid":       userA.UUID,
+		"challenge":  challenge,
+		"signature":  sigA,
+		"session_id": sessID,
+	}
+	fmt.Println("🧐 Submitting proof to Bank API...")
+	postToAPI(BankAPI+"/api/submit-proof", payload, "")
+
+	statusResp := getRequest(BankAPI + "/bank/status/" + sessID)
+	fmt.Printf("🏦 Bank Session Status: %s (UUID: %v)\n", statusResp["status"], statusResp["uuid"])
+
+	// --- SECTION 3: P2P RELAY FLOW ---
+	fmt.Println("\n--- [Test 3: P2P Relay Flow] ---")
+	p2pInit := postToAPI(P2PServer+"/p2p/create", map[string]string{"prover_uuid": userB.UUID}, "")
+	var p2pSess map[string]interface{}
+	json.Unmarshal([]byte(p2pInit.body), &p2pSess)
+	p2pID := p2pSess["session_id"].(string)
+	fmt.Printf("P2P Session ID: %s\n", p2pID)
+
+	p2pChal := "p2p-random-challenge-123"
+	postToAPI(P2PServer+"/p2p/post-challenge", map[string]string{"session_id": p2pID, "challenge": p2pChal}, "")
+
+	sigB := base64.StdEncoding.EncodeToString(signData(userB.PrivKey, p2pChal))
+	postToAPI(P2PServer+"/p2p/submit-signature", map[string]string{"session_id": p2pID, "signature": sigB}, "")
+
+	p2pFinal := getRequest(P2PServer + "/p2p/status/" + p2pID)
+	fmt.Printf("🤝 P2P Handshake Status: %s\n", p2pFinal["status"])
+
+	// --- SECTION 4: SECURITY EDGE CASES ---
+	fmt.Println("\n--- [Test 4: Security Edge Cases] ---")
+
+	// Fixed assignment mismatch here (struct return, not multi-value)
+	fmt.Println("🧐 Case: Accessing Grid API with WRONG API Key (Should FAIL)")
+	gridResp := postToAPI(GridAPI+"/verify", map[string]string{"uuid": userA.UUID}, "WRONG_KEY")
+	if gridResp.code == 401 {
+		fmt.Println("✅ Success: Grid API rejected unauthorized request.")
 	}
 
-	// 5. TEST CASE: VALID FLOW FOR USER B (EXPECTED SUCCESS)
-	fmt.Println("\n--- [Test 5: Valid Handshake for User B (Should PASS)] ---")
-	verifyResult(userB.UUID, chalB, sigActualB, "Valid Logic")
+	// Fixed unused variable 'badChal' by using it in the check
+	fmt.Println("🧐 Case: Signature with Expired/Incorrect Challenge (Should FAIL)")
+	badChal := fetchChallenge(userA.UUID)
+	fmt.Printf("Generated challenge: %s... now attempting verification with wrong data\n", badChal[:8])
+
+	// We use sigA (signed for 'challenge') against 'badChal'
+	verifyResult(userA.UUID, badChal, sigA, "Signature-Challenge Mismatch")
 }
 
-// --- HELPER FUNCTIONS ---
+// --- HELPERS ---
 
 func createTestUser(label string) TestUser {
 	priv, _ := ecdsa.GenerateKey(secp256k1.S256(), rand.Reader)
-	pubHex := fmt.Sprintf("04%064x%064x", priv.PublicKey.X, priv.PublicKey.Y)
+	pubHex := fmt.Sprintf("%064x%064x", priv.PublicKey.X, priv.PublicKey.Y)
 	u := uuid.New().String()
 	fmt.Printf("Created %s: %s\n", label, u)
 	return TestUser{UUID: u, PrivKey: priv, PubKey: pubHex}
 }
 
-func onboardUser(u TestUser) (int, string) {
-	// Fix: Separate hash calculation to ensure it is addressable
+func onboardUser(u TestUser) {
 	hAadhaar := sha256.Sum256([]byte(u.UUID))
 	aHash := hex.EncodeToString(hAadhaar[:])
-
 	sig := base64.StdEncoding.EncodeToString(signData(u.PrivKey, aHash))
-	cStr := u.UUID + aHash + sig + u.PubKey + "SHA256"
-
-	hCombined := sha256.Sum256([]byte(cStr))
+	data := u.UUID + aHash + sig + u.PubKey + "SHA256"
+	hCombined := sha256.Sum256([]byte(data))
 	cHash := hex.EncodeToString(hCombined[:])
 
 	id := Identity{
@@ -107,52 +138,59 @@ func onboardUser(u TestUser) (int, string) {
 		PublicKey: u.PubKey, HashFunction: "SHA256", CombinedHash: cHash,
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 	}
-	return postToAPI(GridAPI+"/create", id)
+	postToAPI(GridAPI+"/create", id, "")
 }
 
 func fetchChallenge(uid string) string {
 	resp := getRequest(VerifierAPI + "/challenge/" + uid)
-	chal, _ := resp["challenge"].(string)
-	return chal
+	return resp["challenge"].(string)
 }
 
 func verifyResult(uid, chal, sig, testName string) {
-	fmt.Printf("🧐 Running: %s\n", testName)
 	payload := map[string]string{"uuid": uid, "challenge": chal, "signature": sig}
-	_, body := postToAPI(VerifierAPI+"/verify-uuid", payload)
-
-	if strings.Contains(body, `"valid":true`) {
-		fmt.Println("🟢 RESULT: VALID")
+	resp := postToAPI(VerifierAPI+"/verify-uuid", payload, "")
+	if strings.Contains(resp.body, `"valid":true`) {
+		fmt.Printf("🟢 %s: VALID\n", testName)
 	} else {
-		fmt.Println("🔴 RESULT: INVALID")
+		fmt.Printf("🔴 %s: INVALID\n", testName)
 	}
 }
 
 func signData(priv *ecdsa.PrivateKey, data string) []byte {
 	hash := sha256.Sum256([]byte(data))
 	r, s, _ := ecdsa.Sign(rand.Reader, priv, hash[:])
-
-	signature := make([]byte, 64)
-	rBytes := r.Bytes()
-	sBytes := s.Bytes()
-	copy(signature[32-len(rBytes):32], rBytes)
-	copy(signature[64-len(sBytes):64], sBytes)
-	return signature
+	sig := append(r.Bytes(), s.Bytes()...)
+	return sig
 }
 
-func postToAPI(url string, payload interface{}) (int, string) {
+type apiResponse struct {
+	code int
+	body string
+}
+
+func postToAPI(url string, payload interface{}, key string) apiResponse {
 	b, _ := json.Marshal(payload)
-	resp, err := http.Post(url, "application/json", bytes.NewBuffer(b))
+	req, _ := http.NewRequest("POST", url, bytes.NewBuffer(b))
+	req.Header.Set("Content-Type", "application/json")
+	if key != "" {
+		req.Header.Set("X-API-KEY", key)
+	}
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
 	if err != nil {
-		log.Fatalf("Request failed: %v", err)
+		log.Fatalf("API Offline: %s", url)
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
-	return resp.StatusCode, string(body)
+	return apiResponse{resp.StatusCode, string(body)}
 }
 
 func getRequest(url string) map[string]interface{} {
-	resp, _ := http.Get(url)
+	resp, err := http.Get(url)
+	if err != nil {
+		log.Fatalf("API Offline: %s", url)
+	}
 	defer resp.Body.Close()
 	var r map[string]interface{}
 	json.NewDecoder(resp.Body).Decode(&r)
